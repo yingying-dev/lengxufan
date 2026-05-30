@@ -16,7 +16,7 @@
 ## 快速开始
 
 1. 克隆本仓库
-2. 安装依赖：`pip安装请求`
+2. 安装依赖：`pip安装请求`（pip install requests）
 3. 到 [硅基流动](https://www.siliconflow.cn) 注册并获取API Key
 4. 在代码中替换 `API_KEY` 为你的密钥
 5. 运行：`python lengxufan.py`
