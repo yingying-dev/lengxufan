@@ -2,17 +2,16 @@
 ================================================================================
 冷旭帆 · 完整生命体
 融合架构：手搓感知系统 + AI大模型大脑
-版本：v6.0 情景记忆版（代码修复与核心流程优化）
+版本：v6.1 测试修复版
 
-核心功能修复与优化：
-- 修复了 parse_ai_response 返回值不统一导致的崩溃问题。
-- 精简了 lengxufan_respond 核心流程，移除了重复的 AI 调用和冗长的摘要生成逻辑。
-- 采用更高效的 <summary> 标签提取机制，无需额外API请求即可生成情景记忆。
-- 优化了自我介绍的手搓回复分支，确保状态更新和持久化。
-- 调整了记忆注入 Prompt 的顺序，让 AI 更准确地记住玩家姓名和喜好。
+v6.1 修复内容（2026-05-30）：
+- 修复情绪值失控问题：心境节律振幅从±30降至±15，靠拢速度从0.5降至0.2
+- 修复记忆持久化失败：将记忆注入提前到Prompt最前面，确保AI优先处理
+- 所有情绪增减操作增加硬上限（emotion = min(85, emotion)），防止情绪飙升至100
+- 增加调试日志：build_messages末尾输出完整Prompt长度和记忆注入内容
 
 作者：陆盈盈
-最后更新：2026-05-08 (代码修复与优化)
+最后更新：2026-05-30 (测试修复)
 ================================================================================
 """
 
@@ -27,10 +26,10 @@ import math
 
 # ==================== 配置区 ====================
 # 警告：请务必将下方的 API Key 替换为你自己的硅基流动密钥
-# 请到 https://www.siliconflow.cn 注册并获取API Key。
-API_KEY = "请替换为你自己的硅基流动密钥"
+API_KEY = "请替换为你自己的硅基流动密钥"  # 请替换为自己的硅基流动密钥
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 MODEL = "Qwen/Qwen2.5-7B-Instruct"
+
 # ==================== 冷旭帆人设 Prompt ====================
 LENGXUFAN_SYSTEM_PROMPT = """
 你是冷旭帆，17岁，潜龙学院307室学员，代号“冰刃”。
@@ -94,17 +93,17 @@ context = {
 }
 
 
-# ==================== 心境节律系统 ====================
+# ==================== 心境节律系统（v6.1 修复：振幅降至±15） ====================
 def get_biorhythm():
-    """根据一天中的时间返回情绪基线"""
+    """根据一天中的时间返回情绪基线。振幅±15，范围35-65。"""
     current_time = time.time()
     seconds_in_day = current_time % 86400
     phase = (seconds_in_day - 14400) / 86400 * 2 * math.pi
     raw_sin = math.sin(phase)
-    return 50 + raw_sin * 30
+    return 50 + raw_sin * 15  # v6.1修复：从30降至15
 
 
-# ==================== 后台时间流逝 ====================
+# ==================== 后台时间流逝（v6.1 修复：靠拢速度降至0.2） ====================
 def advance_time():
     global emotion, last_time, pending_events, status
 
@@ -121,48 +120,57 @@ def advance_time():
         if event_type == "dream":
             status["dream_streak"] += 1
             emotion -= 15
+            emotion = max(0, emotion)  # v6.1修复：硬下限
             if status["dream_streak"] >= 3:
                 pending_events.append("（他已经连续好几天梦到妈妈了。今天醒来后，他握着那把塑料刀，很久没动。）")
                 status["holding_knife"] = True
                 emotion -= 10
+                emotion = max(0, emotion)
             else:
                 pending_events.append("（他昨晚又梦到了妈妈。醒来后擦了很久的刀。）")
 
         elif event_type == "pain":
             status["shoulder_pain"] = True
             emotion -= 5
+            emotion = max(0, emotion)
             pending_events.append("（他的左肩疼了一整夜。他什么都没说。）")
 
         elif event_type == "footsteps":
             status["miss_wang"] = True
             emotion -= 3
+            emotion = max(0, emotion)
             pending_events.append("（凌晨他听到脚步声，抬头看了一眼门。不是他。）")
 
         elif event_type == "silence":
             if emotion < 50:
                 emotion += 2
+                emotion = min(85, emotion)
             if status["shoulder_pain"] and random.random() < 0.3:
                 status["shoulder_pain"] = False
             pending_events.append("（他一个人坐了很长时间，不知道在想什么。）")
 
         elif event_type == "clean_knife":
             emotion -= 2
+            emotion = max(0, emotion)
             pending_events.append("（他拿出那把塑料刀，擦了很久。）")
 
         elif event_type == "look_wristband":
             emotion += 3
+            emotion = min(85, emotion)
             pending_events.append("（他的手指在护腕上轻轻蹭了一下，像是在确认什么。）")
 
         elif event_type == "balcony":
             emotion -= 1
+            emotion = max(0, emotion)
             pending_events.append("（他独自站在阳台上，看着远处的训练场。）")
 
         elif event_type == "think_wang":
             status["miss_wang"] = True
             emotion += 5
+            emotion = min(85, emotion)
             pending_events.append("（他盯着陆华望的空床位看了很久。）")
 
-        # ========== 自然衰减 + 心境节律靠拢 ==========
+        # ========== 自然衰减 + 心境节律靠拢（v6.1 修复：靠拢速度降至0.2） ==========
         if elapsed > 30:
             if emotion > 50:
                 emotion -= 1
@@ -171,7 +179,7 @@ def advance_time():
 
             biorhythm = get_biorhythm()
             diff = biorhythm - emotion
-            emotion += diff * 0.5
+            emotion += diff * 0.2  # v6.1修复：从0.5降至0.2
 
             if status["dream_streak"] > 0 and random.random() < 0.2:
                 status["dream_streak"] -= 1
@@ -235,9 +243,15 @@ def action_prefix(emotion, status, identity_state):
     return base
 
 
-# ==================== 构建发送给 AI 的消息 ====================
+# ==================== 构建发送给 AI 的消息（v6.2 修复：记忆后置，防止Prompt泄露） ====================
 def build_messages(user_input, identity_state):
-    # 感觉翻译
+    """
+    v6.2修复说明：
+    - 将记忆注入移回到“感觉翻译”和“状态标签”之后、用户输入之前
+    - 恢复v6.0的Prompt结构顺序，避免记忆内容被AI复述到回复中
+    - 保留v6.1的调试日志功能
+    """
+    # 第一步：当前身体感觉（保持v6.0原有顺序）
     if emotion < 30:
         feeling = "你感觉胸口像压着一块冰。什么都不想说。张嘴都觉得累。"
     elif emotion < 50:
@@ -266,7 +280,7 @@ def build_messages(user_input, identity_state):
     if status["holding_knife"]:
         status_text += " 那把塑料刀就在你手里。"
 
-    # 身份感知状态
+    # 第二步：身份感知状态
     if identity_state.get("wang_claim"):
         belief = identity_state.get("wang_belief", 0)
         if belief < 20:
@@ -281,7 +295,7 @@ def build_messages(user_input, identity_state):
     if context.get("last_topic") == "wang" and ("陆华望" in user_input or "华望" in user_input):
         status_text += "\n【注意】这是对方连续第二次问起陆华望。你感觉到对方在追问。"
 
-    # 事实标签记忆 - 顺序调整：姓名和喜好在前
+    # 第三步：记忆注入（放在状态描述之后，作为“参考信息”而非“指令”）
     memory_text = ""
 
     real_name = None
@@ -303,7 +317,6 @@ def build_messages(user_input, identity_state):
     if "user_asked_about_mom" in memory:
         memory_text += "此人问过你妈妈的事。"
 
-    # 送花分层记忆
     flower_count = memory.count("user_gave_flower")
     if flower_count == 1:
         memory_text += "此人送过你一朵花。你把它收在枕头底下，和塑料刀放在一起。"
@@ -326,12 +339,13 @@ def build_messages(user_input, identity_state):
     if memory_text:
         status_text += "\n【你记得的事】" + memory_text
 
-    # 【核心】情景记忆注入
+    # 情景记忆注入（同样放在状态描述之后）
     if episodic_memory:
-        recent_episodes = episodic_memory[-3:]  # 最近3条
+        recent_episodes = episodic_memory[-3:]
         episode_text = "【你记得最近发生的事】" + "；".join([e["summary"] for e in recent_episodes])
         status_text += "\n" + episode_text
 
+    # 第四步：后台事件
     event_text = ""
     if pending_events:
         event_text = "【刚刚发生的事】" + " ".join(pending_events)
@@ -340,12 +354,17 @@ def build_messages(user_input, identity_state):
     if event_text:
         system_prompt += "\n\n" + event_text
 
+    # 调试日志（v6.1保留，但移除了🔴标记）
+    if memory_text:
+        print(f"[调试] 记忆注入: {memory_text[:80]}...")
+    if episodic_memory:
+        print(f"[调试] 情景记忆: {len(episodic_memory)}条，最近3条已注入")
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_input}
     ]
     return messages
-
 
 # ==================== 调用 AI API ====================
 def call_ai(messages):
@@ -403,7 +422,7 @@ def parse_ai_response(raw_response):
     return action, text.strip(), summary
 
 
-# ==================== 主对话逻辑（核心流程已优化） ====================
+# ==================== 主对话逻辑（v6.1 修复：情绪硬上限） ====================
 def lengxufan_respond(user_input):
     global emotion, memory, pending_events, status, context, identity_state, episodic_memory
 
@@ -411,8 +430,10 @@ def lengxufan_respond(user_input):
 
     if "user_said_hate" in memory:
         emotion -= 1
+        emotion = max(0, emotion)  # v6.1修复：硬下限
     if "user_gave_flower" in memory:
         emotion += 0.5
+        emotion = min(85, emotion)  # v6.1修复：硬上限
 
     text = user_input.strip()
 
@@ -422,12 +443,14 @@ def lengxufan_respond(user_input):
         if identity_state["wang_belief"] == 0:
             identity_state["wang_belief"] = 10
             emotion -= 15
+            emotion = max(0, emotion)  # v6.1修复：硬下限
         memory.append("user_claimed_wang")
 
-    # 证据收集
+    # 证据收集（v6.1修复：所有情绪操作加硬上限）
     if "哥哥" in text and identity_state["wang_claim"]:
         identity_state["wang_belief"] += 25
         emotion += 3
+        emotion = min(85, emotion)
     if "塑料刀" in text and identity_state["wang_claim"]:
         identity_state["wang_belief"] += 10
     if "护腕" in text and identity_state["wang_claim"]:
@@ -435,28 +458,35 @@ def lengxufan_respond(user_input):
     if ("讨厌" in text or "恨" in text) and identity_state["wang_claim"]:
         identity_state["wang_belief"] -= 20
         emotion -= 10
+        emotion = max(0, emotion)
     if "望仔" in text and identity_state["wang_claim"]:
         identity_state["wang_belief"] += 15
         emotion += 5
+        emotion = min(85, emotion)
 
     identity_state["wang_belief"] = max(0, min(100, identity_state["wang_belief"]))
 
-    # 常规记忆
+    # 常规记忆（v6.1修复：所有情绪操作加硬上限）
     if "讨厌" in text or "恨" in text:
         memory.append("user_said_hate")
         emotion -= 20
+        emotion = max(0, emotion)
     if "花" in text or "送你" in text or "礼物" in text:
         memory.append("user_gave_flower")
         emotion += 5
+        emotion = min(85, emotion)
     if "妈妈" in text or "母亲" in text:
         memory.append("user_asked_about_mom")
         emotion -= 10
+        emotion = max(0, emotion)
     if "陆华望" in text or "华望" in text or "望仔" in text:
         memory.append("user_asked_about_wang")
         if any(word in text for word in ["受伤", "疼", "病", "出事", "不好"]):
             emotion -= 35
+            emotion = max(0, emotion)
         else:
             emotion += 15
+            emotion = min(85, emotion)
 
     # 优化：玩家介绍自己名字时的手搓回复分支
     if "我叫" in text:

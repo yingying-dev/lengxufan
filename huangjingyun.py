@@ -1,23 +1,29 @@
 """
 ================================================================================
-黄景云 · 完整生命体 v2.0
+黄景云 · 完整生命体 v2.1
 融合架构：手搓感知系统 + AI大模型大脑
 
 核心说明：
-- 本代码是基于“冷旭帆 v6.0”架构的角色移植版。
+- 本代码是基于“冷旭帆 v6.2”架构的角色移植版。
 - 完整继承了双重记忆（事实标签+情景摘要）、<summary>标签、手搓回复分支等高级功能。
 - 核心角色内容已全面替换为黄景云（启明），符合其活泼、话多、敏感的角色设定。
 
+v2.1 移植内容（2026-05-30）：
+- 心境节律：靠拢速度从0.3降至0.2（冷旭帆v6.2同款修复）
+- 所有情绪增减操作增加硬上限（emotion = min(85, emotion) / max(0, emotion)）
+- build_messages：记忆注入后置，防止Prompt内容泄露到回复中
+- 增加调试日志：输出记忆注入内容
+
 作者：陆盈盈
-最后更新：2026-05-08 (角色移植与架构升级)
+最后更新：2026-05-30 (v2.1 移植冷旭帆v6.2修复)
 ================================================================================
 """
 
 import os, sys, random, time, requests, json, re, math
 
 # ==================== 配置区 ====================
-# 请到 https://www.siliconflow.cn 注册并获取API Key。
-API_KEY = "请替换为你自己的硅基流动密钥"
+# 警告：请务必将下方的 API Key 替换为你自己的硅基流动密钥
+API_KEY = "请替换为你自己的硅基流动密钥"  # 请替换为自己的硅基流动密钥
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
@@ -79,16 +85,16 @@ context = {
     "conversation_turns": 0,
 }
 
-# ==================== 心境节律系统（黄景云版） ====================
+# ==================== 心境节律系统（黄景云版，v2.1 靠拢速度降至0.2） ====================
 def get_biorhythm():
-    """黄景云的情绪节律：下午和晚上精神最好，凌晨低落"""
+    """黄景云的情绪节律：下午和晚上精神最好，凌晨低落。振幅±12，范围43-67。"""
     current_time = time.time()
     seconds_in_day = current_time % 86400
     phase = (seconds_in_day - 57600) / 86400 * 2 * math.pi
     raw_sin = math.sin(phase)
     return 55 + raw_sin * 12  # 基线55，振幅12，范围43-67
 
-# ==================== 后台时间流逝 ====================
+# ==================== 后台时间流逝（v2.1：靠拢速度降至0.2，硬上限） ====================
 def advance_time():
     global emotion, last_time, pending_events, status
 
@@ -105,37 +111,45 @@ def advance_time():
         if event_type == "allergy_attack":
             status["allergy"] = True
             emotion -= 8
+            emotion = max(0, emotion)  # v2.1修复：硬下限
             pending_events.append("（黄景云的过敏体质又犯了，他揉了揉鼻子，打了个喷嚏。）")
 
         elif event_type == "nightmare":
             status["nightmare"] = True
             emotion -= 12
+            emotion = max(0, emotion)  # v2.1修复：硬下限
             pending_events.append("（他昨晚又做噩梦了，梦到自己在审讯室里被次声波折磨，醒来一身冷汗。）")
 
         elif event_type == "miss_team":
             emotion += 5
+            emotion = min(85, emotion)  # v2.1修复：硬上限
             pending_events.append("（他盯着宿舍的天花板，突然很想念307室的其他人。）")
 
         elif event_type == "language_practice":
             emotion += 3
+            emotion = min(85, emotion)  # v2.1修复：硬上限
             pending_events.append("（他用七种方言自言自语，练习刚学的新句子，自得其乐。）")
 
         elif event_type == "cook_instant_noodles":
             emotion += 2
+            emotion = min(85, emotion)  # v2.1修复：硬上限
             pending_events.append("（他偷偷用电热杯煮了一包泡面，加了两根火腿肠，幸福地叹了口气。）")
 
         elif event_type == "call_home":
             emotion += 8
+            emotion = min(85, emotion)  # v2.1修复：硬上限
             pending_events.append("（他用家乡话给奶奶打了个电话，说自己在学校一切都好，挂掉后眼眶有点红。）")
 
         elif event_type == "daydream":
             if random.random() < 0.5:
                 emotion += 3
+                emotion = min(85, emotion)
             else:
                 emotion -= 3
+                emotion = max(0, emotion)
             pending_events.append("（他望着窗外发了一会儿呆，不知道在想什么。）")
 
-        # 自然衰减 + 心境节律靠拢
+        # ========== 自然衰减 + 心境节律靠拢（v2.1 修复：靠拢速度降至0.2） ==========
         if elapsed > 30:
             if emotion > 55:
                 emotion -= 1
@@ -144,7 +158,7 @@ def advance_time():
 
             biorhythm = get_biorhythm()
             diff = biorhythm - emotion
-            emotion += diff * 0.3
+            emotion += diff * 0.2  # v2.1修复：从0.3降至0.2
 
             if status["allergy"] and random.random() < 0.4:
                 status["allergy"] = False
@@ -196,9 +210,15 @@ def action_prefix(emotion, status, identity_state):
 
     return base
 
-# ==================== 构建发送给 AI 的消息 ====================
+# ==================== 构建发送给 AI 的消息（v2.1 修复：记忆后置） ====================
 def build_messages(user_input, identity_state):
-    # 感觉翻译
+    """
+    v2.1修复说明（移植自冷旭帆v6.2）：
+    - 将记忆注入放在“感觉翻译”和“状态标签”之后、用户输入之前
+    - 避免记忆内容被AI复述到回复中
+    - 保留调试日志功能
+    """
+    # 第一步：当前身体感觉
     if emotion < 40:
         feeling = "你有点低落，不想说话，但你得撑着，至少不能太让人看出来。"
     elif emotion < 60:
@@ -225,7 +245,7 @@ def build_messages(user_input, identity_state):
     if status["worried_about"]:
         status_text += f" 你心里有点惦记{status['worried_about']}，不知道那家伙怎么样了。"
 
-    # 信任状态
+    # 第二步：信任状态
     trust = identity_state.get("trust_level", 0)
     if trust < 30:
         status_text += f" 你还不算很了解眼前这个人（信任值{trust}/100），保持着礼貌的热情。"
@@ -234,7 +254,7 @@ def build_messages(user_input, identity_state):
     else:
         status_text += f" 你对眼前这个人很信任（信任值{trust}/100），可以放下一些伪装了。"
 
-    # 事实标签记忆
+    # 第三步：记忆注入（放在状态描述之后，作为“参考信息”而非“指令”）
     memory_text = ""
     real_name = identity_state.get("known_name")
     if real_name:
@@ -256,12 +276,13 @@ def build_messages(user_input, identity_state):
     if memory_text:
         status_text += "\n【你记得的事】" + memory_text
 
-    # 【核心】情景记忆注入
+    # 情景记忆注入（同样放在状态描述之后）
     if episodic_memory:
         recent_episodes = episodic_memory[-3:]
         episode_text = "【你记得最近发生的事】" + "；".join([e["summary"] for e in recent_episodes])
         status_text += "\n" + episode_text
 
+    # 第四步：后台事件
     event_text = ""
     if pending_events:
         event_text = "【刚刚发生的事】" + " ".join(pending_events)
@@ -269,6 +290,12 @@ def build_messages(user_input, identity_state):
     system_prompt = HUANGJINGYUN_SYSTEM_PROMPT + "\n\n" + status_text
     if event_text:
         system_prompt += "\n\n" + event_text
+
+    # 调试日志（v2.1新增）
+    if memory_text:
+        print(f"[调试] 记忆注入: {memory_text[:80]}...")
+    if episodic_memory:
+        print(f"[调试] 情景记忆: {len(episodic_memory)}条，最近3条已注入")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -282,7 +309,7 @@ def call_ai(messages):
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": MODEL, "messages": messages,
-        "temperature": 0.85, "max_tokens": 180,  # 比冷旭帆稍高，让他话多一点
+        "temperature": 0.85, "max_tokens": 150,  # 从180降至150，防止输出截断导致格式异常
         "top_p": 0.9
     }
 
@@ -292,6 +319,7 @@ def call_ai(messages):
             result = response.json()
             return result["choices"][0]["message"]["content"].strip()
         else:
+            print(f"API错误: {response.status_code} - {response.text}")
             return "……（他张了张嘴，却什么也没说）"
     except:
         return "哎呀，信号好像有点不好……"
@@ -322,7 +350,7 @@ def parse_ai_response(raw_response):
 
     return action, text.strip(), summary
 
-# ==================== 主对话逻辑 ====================
+# ==================== 主对话逻辑（v2.1 修复：情绪硬上限） ====================
 def huangjingyun_respond(user_input):
     global emotion, memory, pending_events, status, context, identity_state, episodic_memory
 
@@ -337,7 +365,7 @@ def huangjingyun_respond(user_input):
             identity_state["known_name"] = name_part
             memory.append(f"user_name_is_{name_part}")
             identity_state["trust_level"] = min(100, identity_state["trust_level"] + 15)
-            emotion = min(85, emotion + 3)
+            emotion = min(85, emotion + 3)  # v2.1修复：硬上限
 
             # 存储情景记忆
             summary = f"我认识了{name_part}，他/她向我做了自我介绍。"
@@ -357,9 +385,10 @@ def huangjingyun_respond(user_input):
                 if len(episodic_memory) > 30:
                     episodic_memory.pop(0)
 
-    # 互动影响情绪
+    # 互动影响情绪（v2.1修复：所有情绪操作加硬上限）
     if any(word in text for word in ["讨厌", "恨", "滚"]):
         emotion -= 15
+        emotion = max(0, emotion)  # v2.1修复：硬下限
         memory.append("user_said_hate")
     if any(word in text for word in ["喜欢", "爱", "谢谢"]):
         emotion = min(85, emotion + 3)
@@ -370,6 +399,7 @@ def huangjingyun_respond(user_input):
         memory.append("user_cheered_up")
     if any(word in text for word in ["叶清辞", "冷旭帆", "陆华望", "307"]):
         emotion += 3
+        emotion = min(85, emotion)  # v2.1修复：硬上限
 
     emotion = max(0, min(100, emotion))
 
