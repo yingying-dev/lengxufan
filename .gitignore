@@ -4,3 +4,8 @@
 # Python运行产生的临时文件
 __pycache__/
 *.pyc
+
+.idea/        # PyCharm 项目配置文件夹
+.vscode/      # VS Code 配置文件夹
+.pytest_cache/ # 如果你用过 pytest 测试
+*.log         # 日志文件（如果有）
